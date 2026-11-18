@@ -1,0 +1,186 @@
+name: build
+
+# Everything that used to cost this laptop gigabytes — the Gradle cache, the
+# Windows C++ intermediates, the engine's ephemeral artifacts — happens here
+# instead. The local rule is: write code, push, download the artifact.
+#
+# Builds are deliberately NOT triggered by ordinary pushes. Only a tag or a
+# manual run compiles binaries, so a repository cannot quietly spend its whole
+# monthly allowance on intermediate commits.
+
+on:
+  workflow_dispatch:
+    inputs:
+      platforms:
+        description: Which targets to build
+        default: all
+        type: choice
+        options: [all, windows, android, web]
+  push:
+    tags: ['v*']
+  pull_request:
+    paths: ['lib/**', 'test/**', 'pubspec.yaml', 'assets/**']
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLUTTER_VERSION: '3.38.5'
+
+jobs:
+  # Runs on every pull request: the cheap gate, and the only thing that runs
+  # for ordinary commits.
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+      - name: Format, analyse, test
+        run: |
+          dart format --output=none --set-exit-if-changed lib test
+          flutter analyze --no-pub
+          flutter test
+
+  # The version the artifacts are named after comes from pubspec, so a release
+  # cannot disagree with the binary.
+  meta:
+    runs-on: ubuntu-latest
+    needs: check
+    if: github.event_name != 'pull_request'
+    outputs:
+      version: ${{ steps.read.outputs.version }}
+      build: ${{ steps.read.outputs.build }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: read
+        run: |
+          raw=$(grep -m1 '^version:' pubspec.yaml | cut -d' ' -f2)
+          echo "version=${raw%%+*}"  >> "$GITHUB_OUTPUT"
+          echo "build=${raw##*+}"    >> "$GITHUB_OUTPUT"
+
+  web:
+    needs: meta
+    if: >-
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
+      github.event.inputs.platforms == 'all' || github.event.inputs.platforms == 'web'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+      - run: flutter build web --release --build-name ${{ needs.meta.outputs.version }} --build-number ${{ needs.meta.outputs.build }}
+      - run: |
+          cd build/web
+          zip -r "../../pomodoro-clock-${{ needs.meta.outputs.version }}-web.zip" .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pomodoro-clock-${{ needs.meta.outputs.version }}-web
+          path: pomodoro-clock-${{ needs.meta.outputs.version }}-web.zip
+
+  android:
+    needs: meta
+    if: >-
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
+      github.event.inputs.platforms == 'all' || github.event.inputs.platforms == 'android'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+      # Per-ABI splits are the download a person can actually install; the
+      # bundle is what Play would take.
+      #
+      # No keystore is configured (android/app/build.gradle.kts still signs
+      # release with the debug key), so these APKs are fine to sideload but not
+      # publishable. A real release needs a keystore in repo secrets.
+      - run: flutter build apk --release --split-per-abi --build-name ${{ needs.meta.outputs.version }} --build-number ${{ needs.meta.outputs.build }}
+      - run: flutter build appbundle --build-name ${{ needs.meta.outputs.version }} --build-number ${{ needs.meta.outputs.build }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pomodoro-clock-${{ needs.meta.outputs.version }}-android
+          path: |
+            build/app/outputs/flutter-apk/app-arm64-v8a-release.apk
+            build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk
+            build/app/outputs/bundle/release/app-release.aab
+
+  windows:
+    needs: meta
+    if: >-
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
+      github.event.inputs.platforms == 'all' || github.event.inputs.platforms == 'windows'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+      # flutter_local_notifications' Windows runner is C++/ATL, and the ATL
+      # component is not part of the runner image's default C++ workload.
+      # Without it the build dies on `atlbase.h`.
+      - name: Ensure the VC++ ATL component
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $install = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Product.BuildTools -property installationPath
+          if (-not $install) { $install = & $vswhere -latest -products * -property installationPath }
+          $atl = Join-Path $install 'VC\Tools\MSVC'
+          if (Test-Path (Join-Path $atl '*\atlmfc\include\atlbase.h')) {
+            Write-Host 'ATL already present'
+            return
+          }
+          $setup = Join-Path "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\setup.exe"
+          Start-Process $setup -Wait -ArgumentList @(
+            'modify', '--installPath', "`"$install`"",
+            '--add', 'Microsoft.VisualStudio.Component.VC.ATL',
+            '--quiet', '--norestart'
+          )
+      - run: flutter build windows --release --build-name ${{ needs.meta.outputs.version }} --build-number ${{ needs.meta.outputs.build }}
+        shell: pwsh
+      - name: Stage the portable folder
+        shell: pwsh
+        run: |
+          $stage = "pomodoro-clock-${{ needs.meta.outputs.version }}-windows-x64"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item build/windows/x64/runner/Release/* $stage -Recurse
+          Compress-Archive -Path $stage -DestinationPath "$stage.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pomodoro-clock-${{ needs.meta.outputs.version }}-windows-x64
+          path: pomodoro-clock-${{ needs.meta.outputs.version }}-windows-x64.zip
+
+  # Tag pushes become a release people can actually download; manual runs only
+  # leave artifacts on the workflow page, which is the right place for a build
+  # that was a test.
+  release:
+    needs: [meta, web, android, windows]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: pomodoro-clock-*
+      # upload-artifact keeps the common directory prefix, so the APKs and the
+      # bundle land under flutter-apk/ and bundle/release/ inside the download.
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            pomodoro-clock-*-web/**/*.zip
+            pomodoro-clock-*-android/**/*.apk
+            pomodoro-clock-*-android/**/*.aab
+            pomodoro-clock-*-windows-x64/**/*.zip
