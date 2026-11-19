@@ -215,10 +215,11 @@ flutter test                # 210 tests
 ## Build in the cloud, not on this laptop
 
 `.github/workflows/build.yml` compiles every target on GitHub's runners: `check`
-(format, analyse, test), `web`, `android` (per-ABI APKs + a bundle), and
-`windows`, each uploading a named artifact. Ordinary pushes and pull requests
-run only `check`; binaries are built on a `workflow_dispatch` or on a `v*` tag,
-which also opens a GitHub Release with all four files attached.
+(format, analyse, test), `web`, `android` (per-ABI APKs + a bundle), `windows`,
+and `macos` (ad-hoc-signed `.app` in a zip and a drag-to-Applications `.dmg`),
+each uploading a named artifact. Ordinary pushes and pull requests run only
+`check`; binaries are built on a `workflow_dispatch` or on a `v*` tag, which
+also opens a GitHub Release with every file attached.
 
 This exists because a local cross-platform build costs this machine space it
 does not have: the Gradle caches alone were ~500 MB, `build/` reached 380 MB,
@@ -229,16 +230,35 @@ or `-d windows` for a quick look, push, download the artifact.
 ```powershell
 gh auth login                                     # once, interactive
 git init; git add -A; git commit -m "1.3.0"       # once
-gh repo create pomodoro-clock --private --source=. --push
-git tag v1.3.0; git push origin v1.3.0            # builds everything
-gh run list                                       # watch it
+gh repo create pomodoro-clock --public --source=. --push
+gh workflow run build.yml -f platforms=all        # or a v* tag
+gh run download <id> -D artifacts                 # get the binaries back
 ```
 
-Two things the workflow cannot do from here. iOS and macOS need an Apple
-runner, which is not on the free tier — that is what Codemagic's hosted macOS
-minutes are for. And Android release builds still sign with the debug key
+Downloading and checking one, without disturbing the installed app:
+
+```powershell
+powershell -File tool\smoke_test_windows_build.ps1 `
+  -Zip artifacts\pomodoro-clock-1.3.0-windows-x64\pomodoro-clock-1.3.0-windows-x64.zip
+```
+
+One thing the workflow still cannot do, and it is not a runner problem: iOS
+needs an Apple Developer signing identity and a provisioning profile before
+`flutter build ipa` will produce anything installable, so that remains Xcode on
+a Mac you own with a certificate you have to buy. macOS builds here precisely
+because the repository is public — GitHub gives public repositories free macOS
+runner time — and the resulting `.app` is ad-hoc signed, which means it runs on
+your own Mac but shows Gatekeeper's warning until you clear the quarantine
+attribute. Android release builds likewise still sign with the debug key
 (`android/app/build.gradle.kts`), so the APKs are sideloadable but not
 publishable until a keystore is added as repository secrets.
+
+The Windows target is the one place the runner and this laptop genuinely
+differ: `windows-latest` now carries MSVC 14.51, whose `<experimental/coroutine>`
+guard is an error rather than a warning, which is what
+`_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS` in
+`windows/CMakeLists.txt` exists for. It is inert on the VS 2019 toolset this
+machine uses, so both build the same source unchanged.
 
 ## Build and install on Windows
 
@@ -256,6 +276,11 @@ Menu entry instead.
 
 ## Build and install on macOS
 
+The macOS bundle is built by the `macos` job in the cloud workflow, so no Mac is
+needed to produce it — download `pomodoro-clock-<ver>-macos.dmg` (or the `.app`
+zip) from the run or the Release page. On a Mac you do have, the local script
+does the same thing:
+
 ```bash
 ./scripts/build_mac.sh          # release .app + drag-to-Applications .dmg in dist/
 ./scripts/build_mac.sh --no-dmg # .app only, zipped
@@ -267,9 +292,16 @@ first run, along with the Pods for `shared_preferences` and `audioplayers_darwin
 (that's why CocoaPods is a requirement above). That's expected, not a broken
 checkout.
 
-Open the resulting `.dmg` and drag **Pomodoro Clock** to Applications. The script
-ad-hoc signs the bundle so it launches on the machine that built it; for
-distribution to other Macs, sign and notarize with your own Developer ID
+Open the resulting `.dmg` and drag **Pomodoro Clock** to Applications. The bundle
+is ad-hoc signed (`codesign --sign -`), which is enough to launch on the machine
+that built it but not notarised, so a copy downloaded from GitHub arrives with
+the quarantine flag and Gatekeeper objects once. Clear it and it opens normally:
+
+```bash
+xattr -dr com.apple.quarantine "/Applications/Pomodoro Clock.app"
+```
+
+For distribution to other Macs, sign and notarize with your own Developer ID
 (the command is commented in the script).
 
 ## Build for Android
@@ -388,6 +420,9 @@ tool/
   make_seed_pages.py            the same pages with a week of practice written
                                 straight into localStorage, so a screenshot can
                                 show a populated log and a fired reminder
+  smoke_test_windows_build.ps1  runs an unpacked Windows build, waits for its
+                                window, closes it with WM_CLOSE, and restores
+                                your settings byte-for-byte afterwards
 listen/                         the tanpura A/B render and its spectrum plot
 ```
 
