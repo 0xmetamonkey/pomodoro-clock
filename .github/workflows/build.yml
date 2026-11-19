@@ -39,6 +39,10 @@ jobs:
         with:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           cache: true
+      # flutter-action only installs the SDK. Without this the analyser finds
+      # no .dart_tool/package_config.json, so every package import is
+      # unresolved and `analyze` reports thousands of phantom errors.
+      - run: flutter pub get
       - name: Format, analyse, test
         run: |
           dart format --output=none --set-exit-if-changed lib test
@@ -74,6 +78,7 @@ jobs:
         with:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           cache: true
+      - run: flutter pub get
       - run: flutter build web --release --build-name ${{ needs.meta.outputs.version }} --build-number ${{ needs.meta.outputs.build }}
       - run: |
           cd build/web
@@ -100,6 +105,7 @@ jobs:
         with:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           cache: true
+      - run: flutter pub get
       # Per-ABI splits are the download a person can actually install; the
       # bundle is what Play would take.
       #
@@ -148,6 +154,8 @@ jobs:
             '--add', 'Microsoft.VisualStudio.Component.VC.ATL',
             '--quiet', '--norestart'
           )
+      - run: flutter pub get
+        shell: pwsh
       - run: flutter build windows --release --build-name ${{ needs.meta.outputs.version }} --build-number ${{ needs.meta.outputs.build }}
         shell: pwsh
       - name: Stage the portable folder
