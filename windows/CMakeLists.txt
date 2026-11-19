@@ -32,6 +32,15 @@ set(CMAKE_CXX_FLAGS_PROFILE "${CMAKE_CXX_FLAGS_RELEASE}")
 # Use Unicode for all projects.
 add_definitions(-DUNICODE -D_UNICODE)
 
+# audioplayers_windows builds against Microsoft.Windows.ImplementationLibrary,
+# whose headers include <experimental/coroutine>. MSVC 14.51 (Visual Studio 18,
+# which is what GitHub's windows-latest runner now installs) promoted that
+# include from a warning to a hard C2338 static_assert, so the plugin cannot
+# compile without this opt-out. It is Microsoft's documented suppression, it is
+# inert on the older toolsets this project also builds with, and it lets the
+# same source tree build on both.
+add_compile_definitions(_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS)
+
 # Compilation settings that should be applied to most targets.
 #
 # Be cautious about adding new options here, as plugins use this function by
