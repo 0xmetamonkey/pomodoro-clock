@@ -15,7 +15,7 @@ on:
         description: Which targets to build
         default: all
         type: choice
-        options: [all, windows, android, web]
+        options: [all, windows, android, web, macos]
   push:
     tags: ['v*']
   pull_request:
@@ -170,11 +170,56 @@ jobs:
           name: pomodoro-clock-${{ needs.meta.outputs.version }}-windows-x64
           path: pomodoro-clock-${{ needs.meta.outputs.version }}-windows-x64.zip
 
+  # The one target this laptop has never been able to produce. Public repos get
+  # GitHub's macOS runners at no cost, so the .app and the .dmg can be built
+  # here even though there is no Mac to build them on.
+  macos:
+    needs: meta
+    if: >-
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
+      github.event.inputs.platforms == 'all' || github.event.inputs.platforms == 'macos'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+      - run: flutter pub get
+      # macos/Podfile and the .xcworkspace are not in the archive - the tool
+      # writes them and runs pod install on the first build, same as locally.
+      - run: flutter build macos --release --build-name ${{ needs.meta.outputs.version }} --build-number ${{ needs.meta.outputs.build }}
+      - name: Package the app and the drag-to-Applications image
+        run: |
+          set -euo pipefail
+          ver='${{ needs.meta.outputs.version }}'
+          app="build/macos/Build/Products/Release/Pomodoro Clock.app"
+          test -d "$app" || { echo "$app missing after a successful build"; exit 1; }
+          # Ad-hoc signature, exactly like scripts/build_mac.sh. A Developer ID
+          # plus notarisation would be needed to hand this out strangers; for
+          # your own Mac the quarantine warning is dismissed with
+          #   xattr -dr com.apple.quarantine "/Applications/Pomodoro Clock.app"
+          codesign --force --deep --sign - "$app"
+          stage=$(mktemp -d)
+          cp -R "$app" "$stage/"
+          ln -s /Applications "$stage/Applications"
+          hdiutil create -quiet -volname 'Pomodoro Clock' -srcfolder "$stage" \
+            -ov -format UDZO "pomodoro-clock-${ver}-macos.dmg"
+          ditto -c -k --sequesterRsrc --keepParent "$app" \
+            "pomodoro-clock-${ver}-macos.app.zip"
+          ls -l "pomodoro-clock-${ver}-macos.dmg" "pomodoro-clock-${ver}-macos.app.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pomodoro-clock-${{ needs.meta.outputs.version }}-macos
+          path: |
+            pomodoro-clock-${{ needs.meta.outputs.version }}-macos.dmg
+            pomodoro-clock-${{ needs.meta.outputs.version }}-macos.app.zip
+
   # Tag pushes become a release people can actually download; manual runs only
   # leave artifacts on the workflow page, which is the right place for a build
   # that was a test.
   release:
-    needs: [meta, web, android, windows]
+    needs: [meta, web, android, windows, macos]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
@@ -192,3 +237,5 @@ jobs:
             pomodoro-clock-*-android/**/*.apk
             pomodoro-clock-*-android/**/*.aab
             pomodoro-clock-*-windows-x64/**/*.zip
+            pomodoro-clock-*-macos/**/*.dmg
+            pomodoro-clock-*-macos/**/*.zip
